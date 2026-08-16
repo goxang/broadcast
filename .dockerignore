@@ -1,0 +1,15 @@
+.git
+bin
+.idea
+.vscode
+*.md
+docs
+examples
+config
+charts
+test/manifests
+test/e2e
+Makefile
+LICENSE
+.gitignore
+.dockerignore

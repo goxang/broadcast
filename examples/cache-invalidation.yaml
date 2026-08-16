@@ -1,0 +1,10 @@
+apiVersion: networking.goxang.io/v1alpha1
+kind: Broadcast
+metadata:
+  name: cache-invalidation
+spec:
+  service:
+    name: my-service
+    targetPort: 8080
+  protocol: HTTP
+  timeout: 50ms

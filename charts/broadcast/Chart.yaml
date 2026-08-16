@@ -1,0 +1,16 @@
+apiVersion: v2
+name: broadcast
+description: Best-effort HTTP broadcast primitive for Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/goxang/broadcast
+sources:
+  - https://github.com/goxang/broadcast
+keywords:
+  - broadcast
+  - fanout
+  - cache-invalidation
+  - kubernetes
+maintainers:
+  - name: goxang

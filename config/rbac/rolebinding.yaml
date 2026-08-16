@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: broadcast
+  namespace: goxang-broadcast-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: broadcast
+subjects:
+  - kind: ServiceAccount
+    name: broadcast
+    namespace: goxang-broadcast-system

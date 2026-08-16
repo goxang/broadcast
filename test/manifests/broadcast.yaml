@@ -1,0 +1,12 @@
+apiVersion: networking.goxang.io/v1alpha1
+kind: Broadcast
+metadata:
+  name: cache-invalidation
+  namespace: goxang-broadcast-test
+spec:
+  service:
+    name: broadcast-target-svc
+    targetPort: 8080
+  protocol: HTTP
+  timeout: 500ms
+  concurrency: 16
