@@ -385,6 +385,43 @@ func TestBodyTooLarge(t *testing.T) {
 	}
 }
 
+// TestIndependentReplicasServeOwnState demonstrates the horizontal-scalability
+// property: two proxy instances backed by two independent resolvers (i.e. two
+// replicas) each serve broadcasts from their own local cache, with no shared
+// state between them.
+func TestIndependentReplicasServeOwnState(t *testing.T) {
+	var hits1, hits2 int32
+	srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits1, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits2, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv2.Close()
+
+	res1 := resolver.New()
+	res2 := resolver.New()
+	key := types.NamespacedName{Namespace: "test", Name: "b"}
+	res1.Set(key, resolver.State{Endpoints: []resolver.Endpoint{{IP: "127.0.0.1", Port: int32(mustPort(srv1))}}, Timeout: time.Second, Concurrency: 16})
+	res2.Set(key, resolver.State{Endpoints: []resolver.Endpoint{{IP: "127.0.0.1", Port: int32(mustPort(srv2))}}, Timeout: time.Second, Concurrency: 16})
+
+	p1 := newTestProxy(res1)
+	p2 := newTestProxy(res2)
+
+	p1.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/broadcast/b/x", nil))
+	if atomic.LoadInt32(&hits1) != 1 || atomic.LoadInt32(&hits2) != 0 {
+		t.Fatalf("replica isolation broken after p1: hits1=%d hits2=%d", hits1, hits2)
+	}
+
+	p2.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/broadcast/b/x", nil))
+	if atomic.LoadInt32(&hits1) != 1 || atomic.LoadInt32(&hits2) != 1 {
+		t.Fatalf("replica isolation broken after p2: hits1=%d hits2=%d", hits1, hits2)
+	}
+}
+
 // TestCancelledContextAccounting verifies the summary accounting invariant:
 // every dispatched target is counted exactly once (as a response or an error),
 // and targets skipped because of a cancelled/expired context are not

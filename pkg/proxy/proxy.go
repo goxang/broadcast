@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -155,7 +156,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res := p.fanout(r.Context(), name, state, forwardPath, r.URL.RawQuery, r, body)
 
 	if p.metrics != nil {
-		p.metrics.RequestsTotal.WithLabelValues(name, fmt.Sprintf("%d", res.status)).Inc()
+		p.metrics.RequestsTotal.WithLabelValues(name, strconv.Itoa(res.status)).Inc()
 	}
 	p.respondJSON(w, res.status, res.summary)
 }
@@ -246,7 +247,7 @@ done:
 			continue
 		}
 		sum.Responses++
-		sum.Statuses[fmt.Sprintf("%d", r.status)]++
+		sum.Statuses[strconv.Itoa(r.status)]++
 	}
 
 	// Dispatch was initiated for at least one target: this is best-effort, so
@@ -287,7 +288,7 @@ func (p *Proxy) sendOne(
 	// Drain and discard the response body so the connection can be reused.
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 
-	p.observeTarget(name, fmt.Sprintf("%d", resp.StatusCode))
+	p.observeTarget(name, strconv.Itoa(resp.StatusCode))
 	return targetResult{status: resp.StatusCode}
 }
 

@@ -259,13 +259,20 @@ eligible endpoints it knew about, within the timeout."* Nothing more.
 
 ## Scaling & performance
 
+- **Horizontal scaling:** every pod is self-contained (own informers, resolver,
+  and proxy) with no shared state or leader election. Scale out by raising the
+  Deployment `replicaCount` behind the normal `broadcast` Service; each replica
+  serves any Broadcast. Replica state may transiently differ, which is fine
+  under best-effort semantics.
 - Fan-out concurrency is bounded per Broadcast (`spec.concurrency`, default 16),
   so a large target set cannot spawn unbounded goroutines or connections.
 - The proxy reuses a connection-pooled `http.Transport`
   (`MaxIdleConnsPerHost=8`), so steady-state broadcasts do not pay a TCP
   handshake per target.
+- Endpoint resolution is a copy-on-write `atomic.Pointer` snapshot read — no
+  lock and no allocation on the request path.
 - Controller CPU/memory is tiny (informer caches of a handful of objects). The
-  proxy does a `RWMutex` read + N HTTP calls per broadcast.
+  proxy does a lock-free resolver read + N HTTP calls per broadcast.
 
 A small in-cluster benchmark (1, 2, 3, 5, 10 tiny targets) is reproduced in
 [docs/architecture.md](docs/architecture.md) with observed latency and resource

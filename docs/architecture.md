@@ -9,7 +9,7 @@ calls.
 
 ```
                         ┌────────────────────────────────────────────┐
-                        │            broadcast process              │
+                        │            broadcast process (replica N)   │
                         │                                            │
   API server            │  controller (control plane)               │
    Broadcast CR ──────► │    informers: Broadcast, Service,         │
@@ -17,7 +17,7 @@ calls.
    EndpointSlice ─────► │    reconcile -> resolver.Set(key, state)  │
                         │                     │                      │
                         │                     ▼                      │
-                        │  resolver (in-memory, RWMutex)            │
+                        │  resolver (copy-on-write, atomic.Pointer) │
                         │                     │                      │
                         │                     ▼                      │
   HTTP client ────────► │  proxy (data plane)                       │
@@ -56,7 +56,8 @@ reads informer caches.
 `pkg/proxy`:
 
 1. Receives `POST /broadcast/{name}/{forwardPath}`.
-2. Reads `resolver.State(name)` — a `RWMutex` read.
+2. Reads `resolver.State(name)` — a lock-free, allocation-free atomic-pointer
+   load of an immutable snapshot.
 3. Fans the request (method, headers, body, query) out to every endpoint within
    `state.Timeout`, bounded by `state.Concurrency` via a semaphore.
 4. Collects per-target outcomes, never retries, never blocks past the timeout.
@@ -68,11 +69,46 @@ TCP handshake per target.
 
 ## Shared state
 
-`pkg/resolver` is a `map[types.NamespacedName]State` guarded by a `RWMutex`.
-The controller is the only writer; the proxy is the only reader. This is the
-"API-free hot path" boundary. Splitting the two roles into separate deployments
-later would replace this with a shared cache or a status read, without touching
-either package's logic.
+`pkg/resolver` is a copy-on-write store: writes build a fresh immutable snapshot
+and publish it with a single `atomic.Pointer` swap. Reads return the immutable
+snapshot directly — no lock, no copy, no allocation on the hot path. The
+controller is the only writer; the proxy is the only reader. This is the
+"API-free hot path" boundary.
+
+## Horizontal scaling
+
+Every replica (pod) is fully self-contained: it runs its own informers
+(Broadcast/Service/EndpointSlice), its own controller, its own resolver, and its
+own proxy. There is **no shared state, no coordination layer, and no leader
+election** — replicas communicate only with the Kubernetes API server via
+informers.
+
+```
+                    Kubernetes API
+                         │
+                    WATCH/cache
+              ┌──────────┼──────────┐
+              ▼          ▼          ▼
+          Broadcast   Broadcast   Broadcast
+           Pod 1       Pod 2       Pod 3
+          Controller  Controller  Controller
+             +           +           +
+            Proxy       Proxy       Proxy
+              │          │          │
+              └──────────┼──────────┘
+                         ▼
+                       Targets
+```
+
+- Scale out simply by raising the Deployment `replicaCount` behind the normal
+  `broadcast` Service.
+- Each replica can serve any Broadcast request; the Service load-balances
+  requests across replicas.
+- Replica endpoint state may transiently differ (watch propagation latency).
+  This is expected and consistent with best-effort semantics.
+- Multiple replicas each reconcile independently and write `Broadcast.status`;
+  the idempotent, compare-before-write status update makes this safe without
+  leader election.
 
 ## Response semantics
 
@@ -85,7 +121,8 @@ body and never fail the caller.
 
 ## Limitations (v1alpha1)
 
-- Single process (controller + proxy). Split deployment is a future option.
+- Controller and proxy share one process per pod (scaled via replicas, not a
+  split deployment).
 - Single namespace: the controller watches its own namespace and the proxy
   routes `/broadcast/{name}/{path}` by looking up `{name}` in that namespace.
   Cluster-wide (multi-namespace) routing is not supported.

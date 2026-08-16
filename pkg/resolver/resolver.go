@@ -5,10 +5,16 @@
 // The proxy never talks to the Kubernetes API server: it reads this store,
 // which the controller keeps current. This is what keeps the hot path
 // independent of API calls.
+//
+// The store is copy-on-write: writes build a fresh immutable snapshot and
+// publish it with a single atomic pointer swap, so the read path is lock-free
+// and allocation-free. Each replica (pod) runs its own independent resolver,
+// which is what makes the data plane horizontally scalable with no shared
+// state or coordination layer.
 package resolver
 
 import (
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -25,6 +31,9 @@ type Endpoint struct {
 
 // State is the fully-resolved runtime state of a single Broadcast, ready to be
 // consumed by the proxy without any further Kubernetes access.
+//
+// The Endpoints slice returned by Resolver.State is immutable and shared with
+// the live snapshot; callers must treat it as read-only.
 type State struct {
 	// Endpoints is the current set of ready endpoints.
 	Endpoints []Endpoint
@@ -49,52 +58,74 @@ type Resolver interface {
 	Snapshot() map[types.NamespacedName]State
 }
 
-// Memory is a concurrency-safe in-memory Resolver.
+// snapshot is an immutable map of namespaced-name to State. A new snapshot is
+// allocated on every write and published atomically, so readers always observe
+// a complete, self-consistent view and never lock.
+type snapshot map[types.NamespacedName]State
+
+// Memory is a copy-on-write, concurrency-safe Resolver. Reads (the proxy hot
+// path) are a single atomic pointer load with no lock and no allocation;
+// writes (the controller) build a new snapshot and publish it atomically.
 type Memory struct {
-	mu   sync.RWMutex
-	byID map[types.NamespacedName]State
+	snap atomic.Pointer[snapshot]
 }
 
 // New returns an empty in-memory Resolver.
 func New() *Memory {
-	return &Memory{byID: make(map[types.NamespacedName]State)}
+	m := &Memory{}
+	empty := snapshot{}
+	m.snap.Store(&empty)
+	return m
 }
 
-// State implements Resolver.
+// State implements Resolver. It returns the immutable state for key without
+// copying; the caller must not mutate the returned Endpoints slice.
 func (m *Memory) State(key types.NamespacedName) (State, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	s, ok := m.byID[key]
-	if !ok {
-		return State{}, false
-	}
-	s.Endpoints = append([]Endpoint(nil), s.Endpoints...)
-	return s, true
+	s, ok := (*m.snap.Load())[key]
+	return s, ok
 }
 
-// Set implements Resolver.
+// Set implements Resolver. It copies the caller's Endpoints slice before
+// publishing so the live snapshot never aliases caller-owned memory.
 func (m *Memory) Set(key types.NamespacedName, state State) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	state.Endpoints = append([]Endpoint(nil), state.Endpoints...)
-	m.byID[key] = state
+	m.publish(key, state, false)
 }
 
 // Delete implements Resolver.
 func (m *Memory) Delete(key types.NamespacedName) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.byID, key)
+	m.publish(key, State{}, true)
 }
 
-// Snapshot implements Resolver.
+// Snapshot implements Resolver. It returns a fresh map (so callers may mutate
+// it freely) whose Endpoints slices are shared with the immutable snapshot.
 func (m *Memory) Snapshot() map[types.NamespacedName]State {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make(map[types.NamespacedName]State, len(m.byID))
-	for k, v := range m.byID {
-		v.Endpoints = append([]Endpoint(nil), v.Endpoints...)
+	cur := *m.snap.Load()
+	out := make(map[types.NamespacedName]State, len(cur))
+	for k, v := range cur {
 		out[k] = v
 	}
 	return out
+}
+
+// publish builds a new immutable snapshot derived from the current one and
+// atomically swaps it in. Writes are rare (controller reconcile), so the
+// copy-on-write cost is negligible; the CAS retry loop handles concurrent
+// writers.
+func (m *Memory) publish(key types.NamespacedName, state State, remove bool) {
+	for {
+		old := m.snap.Load()
+		next := make(snapshot, len(*old)+1)
+		for k, v := range *old {
+			next[k] = v
+		}
+		if remove {
+			delete(next, key)
+		} else {
+			next[key] = state
+		}
+		if m.snap.CompareAndSwap(old, &next) {
+			return
+		}
+	}
 }
