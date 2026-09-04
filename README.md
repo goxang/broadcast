@@ -1,124 +1,28 @@
-# goxang/broadcast
+# broadcast
 
-Best-effort HTTP broadcast primitive for Kubernetes.
-
-`Broadcast` fans a **single HTTP request** out to **every ready endpoint** of a
-Kubernetes Service:
+A Kubernetes CRD and proxy that fans one HTTP request out to *every* ready
+endpoint of a Service, instead of load-balancing it to one.
 
 ```text
-HTTP Client
-    │
-    ▼
-Broadcast proxy
-    │
-    ├──── HTTP request ────► Pod A
-    ├──── HTTP request ────► Pod B
-    ├──── HTTP request ────► Pod C
-    └──── HTTP request ────► Pod D
+                    ┌──► Pod A
+HTTP client ──► /broadcast/{name} ──┼──► Pod B
+                    └──► Pod C
 ```
 
-A normal Kubernetes `Service` load-balances each request to **one** endpoint.
-A `Broadcast` sends it to **all** currently ready endpoints.
+It exists for cache invalidation and similar "your local copy is stale" hints,
+where core Kubernetes gives you no fan-out primitive and standing up
+Kafka/NATS/RabbitMQ is a lot of infrastructure for a message that is allowed to
+be lost. Delivery is deliberately UDP-like: no acknowledgement, no retry, no
+ordering, no persistence. If you need any of those, use a real queue.
 
-The intended use case is cache invalidation and similar event-hint /
-optimization workloads: broadcast a "your cache is stale" hint to every replica
-and let the application's own reconciliation (cache-miss, polling, TTL) handle
-anything that was missed.
-
----
-
-## Why not a normal Service?
-
-A `Service` gives you exactly one backend per connection/request (round-robin or
-session-affinity). There is no primitive in core Kubernetes that fans one
-request out to every pod. The standard answer — "put Kafka/NATS/RabbitMQ in
-front" — is a lot of infrastructure for a hint that is, by design, allowed to
-be lost.
-
-`Broadcast` fills the gap with a tiny, best-effort fan-out that is explicitly
-*not* a messaging system.
-
----
-
-## What "best effort" means
-
-Delivery is intentionally UDP-like:
-
-- No acknowledgement protocol.
-- No delivery guarantee.
-- No retry.
-- No persistence.
-- No ordering guarantee.
-- No requirement that every pod receives the broadcast.
-- A pod that joins after a broadcast does not receive it.
-- A pod that is unavailable or terminating may miss it.
-- The sender never learns which pods actually received it.
-- A short, configurable timeout bounds the fan-out.
-
-**Correctness of your application must not depend on broadcast delivery.** The
-broadcast is an optimization; the source of truth lives elsewhere.
-
-### This is NOT a messaging system
-
-Do not use `Broadcast` as a replacement for Kafka, RabbitMQ, NATS, SQS, or any
-queue/stream. There is no queue, no durable store, no ack, no redelivery, no
-ordering, no consumer groups. If you need *reliable* delivery, use a real
-messaging system. If you need a *cheap, fast, lossy hint*, use `Broadcast`.
-
----
-
-## Architecture
-
-Two cleanly separated packages in one small binary:
-
-```mermaid
-flowchart LR
-    subgraph cluster
-        APIServer[API server]
-        CR[Broadcast CR]
-        SVC[Service]
-        ES[EndpointSlices]
-    end
-
-    subgraph broadcast[Broadcast controller + proxy]
-        C[controller] -->|watch| CR
-        C -->|watch| SVC
-        C -->|watch| ES
-        C -->|resolve endpoints| R[(in-memory resolver)]
-        P[proxy] -->|read| R
-    end
-
-    Client[HTTP client] -->|POST /broadcast/name/path| P
-    P -->|fan-out| PodA[Pod A]
-    P -->|fan-out| PodB[Pod B]
-    P -->|fan-out| PodC[Pod C]
-```
-
-- **Controller** (`pkg/controller`): watches `Broadcast`, `Service`, and
-  `EndpointSlice` objects via informers, resolves the current ready endpoint
-  set, and writes it into an in-memory `resolver`. It also updates
-  `Broadcast.status`.
-- **Proxy** (`pkg/proxy`): an HTTP handler that reads the resolver and fans
-  requests out. **The request path performs zero Kubernetes API calls.**
-
-The two roles share one process for v1alpha1 (small, fast, simple). The
-interface between them is `resolver.Resolver`, so they can be split into
-separate deployments later without changing either side.
-
-More detail in [docs/architecture.md](docs/architecture.md).
-
----
-
-## Quick start
-
-### 1. Install
+## Install
 
 ```bash
 helm install broadcast oci://ghcr.io/goxang/charts/broadcast \
   --namespace goxang-broadcast-system --create-namespace
 ```
 
-Or with raw manifests (see `config/`):
+Or with raw manifests:
 
 ```bash
 kubectl apply -f config/crd/
@@ -126,12 +30,13 @@ kubectl create namespace goxang-broadcast-system
 kubectl apply -f config/rbac/ -f config/manager/ -n goxang-broadcast-system
 ```
 
-The controller and proxy are **single-namespace** in v1alpha1: they watch
-`Broadcast`s in the namespace they are deployed to, and the proxy routes
-`/broadcast/{name}/{path}` by looking up `{name}` in that same namespace.
-Cluster-wide (multi-namespace) routing is not supported yet.
+v1alpha1 is single-namespace: the controller watches `Broadcast`s in the
+namespace it runs in, and the proxy resolves `/broadcast/{name}` against that
+same namespace. Cluster-wide routing is not supported yet.
 
-### 2. Create a Broadcast
+## Usage
+
+Point a `Broadcast` at an existing Service:
 
 ```yaml
 apiVersion: networking.goxang.io/v1alpha1
@@ -142,75 +47,23 @@ spec:
   service:
     name: my-service
     targetPort: 8080
-  protocol: HTTP
   timeout: 50ms
 ```
 
-`spec.service` references an **existing** Service; the Broadcast never creates
-or owns your Deployment.
-
-### 3. Send a broadcast
+Then send it a request:
 
 ```bash
-curl -X POST http://broadcast.goxang-broadcast-system.svc:8080/broadcast/cache-invalidation/invalidate \
-  -H 'Content-Type: application/json' \
-  -d '{"key":"user:42"}'
+# service is "broadcast" with the raw manifests, "<release>-broadcast" via Helm
+curl -X POST http://broadcast:8080/broadcast/cache-invalidation/invalidate \
+  -H 'Content-Type: application/json' -d '{"key":"user:42"}'
 ```
 
-The proxy forwards `POST /invalidate` (same method, headers, body, query) to
-every ready endpoint of `my-service` on port `8080`.
+Every ready endpoint of `my-service` receives `POST /invalidate` on port 8080
+with the same method, path suffix, query string, headers, and body. Hop-by-hop
+headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `Host`, …)
+are stripped; each target sees its own `Host`.
 
-Request forwarding: method, path, query string, body, and headers are preserved.
-Hop-by-hop headers (`Connection`, `Keep-Alive`, `Transfer-Encoding`, `Upgrade`,
-`Host`, etc.) are stripped, and the target sees its own `Host` header.
-
----
-
-## API
-
-```yaml
-apiVersion: networking.goxang.io/v1alpha1
-kind: Broadcast
-spec:
-  service:
-    name: string       # existing Service name (same namespace)
-    targetPort: integer # pod/endpoint port the targets listen on (NOT the Service port)
-  protocol: HTTP      # only HTTP in v1alpha1 (default: HTTP)
-  timeout: 1s         # fan-out budget (default: 1s)
-  concurrency: 16     # max in-flight target requests (default: 16)
-status:
-  endpoints: 3        # ready endpoints currently resolved
-  conditions:         # Ready=True when >=1 ready endpoint
-    - type: Ready
-      status: "True"
-      reason: Ready
-```
-
-Printer columns: `SERVICE`, `TARGETPORT`, `TIMEOUT`, `ENDPOINTS`, `AGE`.
-
-`spec.service.targetPort` is matched against the **EndpointSlice endpoint
-port** (the pod port), exactly like a `Service`'s `targetPort`. It is *not* the
-Service port, so it is unambiguous even when the Service maps its `port` to a
-different `targetPort`. If the Service does not set a `targetPort` (i.e. it
-defaults to the Service port), set this to the Service port number.
-
----
-
-## Response semantics
-
-The proxy is honest: it never pretends to guarantee delivery.
-
-| Response | Meaning |
-|----------|---------|
-| `202 Accepted` | The broadcast was dispatched to ≥1 target. Body is a summary (targets, responses, errors, `timed_out`). Delivery to any given target is **not** guaranteed. |
-| `400 Bad Request` | Malformed path. Expected `/broadcast/{name}[/{path}]`. |
-| `404 Not Found` | No `Broadcast` with that name. |
-| `413 Payload Too Large` | Request body exceeds the 1 MiB default limit. |
-| `503 Service Unavailable` | `Broadcast` known but resolves to zero ready endpoints. |
-
-A `202` is used because the proxy *accepts* the work but cannot *confirm* it was
-delivered — that is the whole point. Individual target failures are folded into
-the summary body and never fail the caller:
+The caller gets one summary, not N responses:
 
 ```json
 {
@@ -225,112 +78,113 @@ the summary body and never fail the caller:
 }
 ```
 
-### Why the proxy waits (and what it does *not* mean)
+## Spec
 
-The proxy dispatches to all eligible endpoints concurrently and then waits, at
-most `spec.timeout`, for target responses before returning `202`. This short
-wait exists **only to collect an honest summary**; it is *not* an acknowledgement
-protocol:
+| Field | Default | Meaning |
+|---|---|---|
+| `spec.service.name` | — | Existing Service in the same namespace |
+| `spec.service.targetPort` | — | Endpoint (pod) port, not the Service port |
+| `spec.protocol` | `HTTP` | Only `HTTP` in v1alpha1 |
+| `spec.timeout` | `1s` | Budget for the entire fan-out |
+| `spec.concurrency` | `16` | Max in-flight target requests, 1–1024 |
 
-- A `200` from a target is the target's **HTTP server** accepting the request.
-  It is not an application-level acknowledgement, and it does not mean the
-  target processed the message.
-- If the budget expires, in-flight requests are cancelled, the result is
-  reported as `timed_out`, and the caller still receives `202` (we dispatched;
-  we do not know the rest).
-- If a target never responds, the proxy does **not** retry and does **not** wait
-  past the timeout.
+`targetPort` is matched against the EndpointSlice endpoint port, exactly like a
+Service's integer `targetPort`, so it stays unambiguous when a Service maps its
+`port` to a different `targetPort`. Named ports are not resolved. If the Service
+sets no `targetPort`, use the Service port number.
 
-So the caller's contract is simply: *"the proxy attempted to fan this out to the
-eligible endpoints it knew about, within the timeout."* Nothing more.
+Status reports `endpoints` (ready endpoints currently resolved) and a `Ready`
+condition, true once at least one endpoint resolves. `kubectl get broadcasts`
+prints service, target port, timeout, endpoint count, and age.
 
----
+## Response semantics
 
-## Failure behavior
+| Code | Meaning |
+|---|---|
+| `202 Accepted` | Dispatched to ≥1 target. Body is the summary above. |
+| `400 Bad Request` | Path is not `/broadcast/{name}[/{path}]`. |
+| `404 Not Found` | No `Broadcast` by that name in the namespace. |
+| `413 Request Entity Too Large` | Body over the limit (1 MiB by default). |
+| `503 Service Unavailable` | Broadcast exists but has zero ready endpoints. |
 
-- A failing/slow/unreachable target is isolated: other targets still receive
-  the broadcast.
-- No retries, ever.
-- A `Broadcast` with zero ready endpoints returns `503` rather than hanging.
-- Endpoint churn (scale up/down, pod restart) is picked up by the controller's
-  informers within watch-latency, not on the request path.
+`202`, never `200`, because the proxy can confirm that it dispatched and nothing
+more. It does wait up to `spec.timeout` for target responses, but only to fill
+in an honest summary — a target's `200` is its HTTP server accepting the
+request, not an application-level ack. When the budget runs out, in-flight
+requests are cancelled, targets not yet dispatched are skipped, `timed_out` is
+set, and the caller still gets `202`. Individual target failures land in
+`errors` and never fail the caller. Nothing is ever retried.
 
----
+Your application's correctness must not depend on a broadcast arriving. A pod
+that starts after the fan-out, or is unavailable during it, simply misses it.
 
-## Scaling & performance
+## How it works
 
-- **Horizontal scaling:** every pod is self-contained (own informers, resolver,
-  and proxy) with no shared state or leader election. Scale out by raising the
-  Deployment `replicaCount` behind the normal `broadcast` Service; each replica
-  serves any Broadcast. Replica state may transiently differ, which is fine
-  under best-effort semantics.
-- Fan-out concurrency is bounded per Broadcast (`spec.concurrency`, default 16),
-  so a large target set cannot spawn unbounded goroutines or connections.
-- The proxy reuses a connection-pooled `http.Transport`
-  (`MaxIdleConnsPerHost=8`), so steady-state broadcasts do not pay a TCP
-  handshake per target.
-- Endpoint resolution is a copy-on-write `atomic.Pointer` snapshot read — no
-  lock and no allocation on the request path.
-- Controller CPU/memory is tiny (informer caches of a handful of objects). The
-  proxy does a lock-free resolver read + N HTTP calls per broadcast.
+One binary, two halves, joined by an in-memory store:
 
-A small in-cluster benchmark (1, 2, 3, 5, 10 tiny targets) is reproduced in
-[docs/architecture.md](docs/architecture.md) with observed latency and resource
-usage. This is a hint primitive, not a high-throughput bus — measure it against
-*that* bar.
+- **`pkg/controller`** watches `Broadcast`, `Service`, and `EndpointSlice` via
+  informers, resolves the ready non-terminating endpoints for each Broadcast,
+  writes them to the resolver, and updates `Broadcast.status`.
+- **`pkg/resolver`** is copy-on-write: writes build a fresh snapshot and publish
+  it with one `atomic.Pointer` swap, so reads are lock- and allocation-free.
+- **`pkg/proxy`** serves `/broadcast/`, reads the resolver, and fans out over a
+  pooled `http.Transport` (`MaxIdleConnsPerHost=8`) with a semaphore bounded by
+  `spec.concurrency`.
 
----
+The request path makes **zero Kubernetes API calls** — endpoint churn is picked
+up by informers, off the hot path. The two halves talk through the
+`resolver.Resolver` interface, so they can be split into separate deployments
+later without either side changing.
 
-## Security model
+Replicas are fully independent: each pod runs its own informers, resolver, and
+proxy, with no shared state and no leader election. Scale out by raising
+`replicaCount`; the Service load-balances callers across replicas. Replica
+endpoint views can differ briefly during watch propagation, which is consistent
+with best-effort delivery. Status writes are compare-before-write and
+idempotent, so concurrent reconcilers are safe.
 
-- Least-privilege `Role`/`RoleBinding` scoped to the install namespace: the
-  controller can `get/list/watch` `broadcasts`, `services`, `endpointslices`
-  and `update/patch` `broadcasts/status` only.
-- Non-root, read-only-root filesystem, `RuntimeDefault` seccomp, all
-  capabilities dropped.
-- The proxy binds only the pod's Service; it does not expose the API server.
+See [docs/architecture.md](docs/architecture.md) for the longer version.
 
----
+## Operating it
 
-## Resource requirements
+Flags: `--namespace` (defaults to `POD_NAMESPACE`), `--listen-addr` (`:8080`),
+`--workers` (2), `--resync-period` (10m), `--max-body-bytes` (1 MiB),
+`--kubeconfig`, `--log-json`.
 
-Defaults: `requests: cpu=10m, memory=32Mi`, `limits: cpu=200m, memory=128Mi`.
-The controller and proxy together are one process; a single small pod is enough
-for most deployments.
+The listener serves `/broadcast/`, `/healthz`, `/readyz` (ready once informer
+caches sync), and `/metrics`. Prometheus metrics: `goxang_broadcast_requests_total`,
+`goxang_broadcast_target_requests_total`, `goxang_broadcast_fanout_duration_seconds`,
+`goxang_broadcast_targets_total`.
 
----
+RBAC is a namespace-scoped Role: `get/list/watch` on broadcasts, services, and
+endpointslices, plus `update/patch` on `broadcasts/status`. The pod runs
+non-root with a read-only root filesystem, `RuntimeDefault` seccomp, and all
+capabilities dropped. Chart defaults request 10m CPU / 32Mi memory and cap at
+200m / 128Mi.
 
-## When NOT to use it
+## Limitations
 
-- You need guaranteed/at-least-once delivery → use a queue/stream.
-- You need ordering → use a queue/stream.
-- You need replay / persistence / DLQ → use a queue/stream.
-- You need request/response semantics against all targets → this returns one
-  summary, not N responses.
-- Payloads are large → bodies are buffered and capped at 1 MiB.
-
-Use it for: cache invalidation, configuration "refresh now" hints, local
-index/derived-data invalidation, and similar fire-and-forget event hints.
-
----
+- HTTP/1.1 only; `spec.protocol` is reserved for HTTP/2 and gRPC later.
+- Single namespace, no cross-namespace Service references.
+- Request bodies are buffered in memory and capped at 1 MiB.
+- No TLS to targets — pod-to-pod plaintext HTTP is assumed.
+- No queue, ack, ordering, replay, or DLQ. This is not a messaging system.
 
 ## Development
 
 ```bash
-make verify      # fmt + vet + test + race
-make build       # static binary at bin/broadcast
+make verify        # fmt, vet, test, test -race
+make build         # static binary at bin/broadcast
 make docker-build
 make helm-lint
-make e2e         # reproducible functional tests against a throwaway kind cluster
+make e2e           # functional suite against a throwaway kind cluster
 ```
 
-The unit tests (`go test ./...`) cover endpoint resolution, the resolver, the
-proxy fan-out, timeout/concurrency bounds, and failure isolation. The
-in-cluster functional suite (basic broadcast, scaling, pod removal, slow/failing
-target, endpoint churn, Service independence) is automated by
-`test/e2e/run.sh` and runs against a temporary `kind` cluster; see
-[docs/architecture.md](docs/architecture.md).
+Unit tests cover endpoint resolution, the resolver, proxy fan-out, and the
+timeout/concurrency bounds. `test/e2e/run.sh` builds the images, installs the
+chart into a `kind` cluster, and exercises basic fan-out, scaling, pod removal,
+slow and failing targets, endpoint churn, and Service independence.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)
