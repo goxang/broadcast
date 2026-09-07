@@ -178,7 +178,25 @@ make build         # static binary at bin/broadcast
 make docker-build
 make helm-lint
 make e2e           # functional suite against a throwaway kind cluster
+make go-benchmark-compare   # benchmarks against origin/main
+make go-coverage-compare    # coverage against origin/main
 ```
+
+Every pull request gets one comment holding both comparisons: coverage before
+and after, and each benchmark before and after with its delta, green where the
+change is an improvement and red where it is a regression. The comment is
+rewritten in place, so ten pushes leave one current table rather than ten
+stale ones.
+
+Allocation counts are deterministic, so any increase fails. Wall time is not,
+so it is measured to survive a shared runner: both sides are built with
+`-trimpath` — without it each binary has its own build directory compiled in,
+which moves code around and can make identical source differ by several
+percent — and run alternately, round by round, so drift hits both equally.
+Anything that still looks more than 5% slower is re-measured on its own over a
+much longer window before it is allowed to fail the build. Coverage is
+compared against the base branch as well as against its floor; a drop of more
+than five points fails.
 
 Unit tests cover endpoint resolution, the resolver, proxy fan-out, and the
 timeout/concurrency bounds. `test/e2e/run.sh` builds the images, installs the

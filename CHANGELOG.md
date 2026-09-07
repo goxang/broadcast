@@ -7,6 +7,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The release workflow refuses to publish a tag that has no section here, so a
 release starts by writing one.
 
+## [Unreleased]
+
+### Repository
+
+- Pull requests get one comment holding both comparisons, rewritten in place
+  on each push: coverage before and after, then every benchmark before and
+  after with its delta, green for an improvement and red for a regression.
+- Coverage is compared against the base branch as well as against its floor.
+  The floor says whether the module is tested well enough; it does not notice
+  a change that sits comfortably above it while deleting half the tests for
+  the code it touches. A drop of more than five points fails.
+- Benchmark wall time is gated rather than only reported. Both sides are built
+  with `-trimpath`, without which each carries its own build directory and the
+  resulting shift in code and data can make identical source differ by several
+  percent — a difference the comparison would otherwise blame on the change
+  under review. The sides are run alternately so a runner drifting mid-job
+  moves both together, and anything more than 5% slower is re-measured over a
+  much longer window before it fails anything.
+- The benchmark comparison checks the base ref out into a git worktree instead
+  of over the top of the current one, so it no longer refuses to run with
+  uncommitted changes and cannot leave the caller on the wrong commit.
+- The benchmark run on `main` is a smoke run. There is nothing to compare
+  against there, so measuring six times over bought nothing that each release
+  then waited on.
+- `shellcheck` runs over `tools/hack` as part of `tidy-check`.
+
 ## [0.1.0] - 2026-09-07
 
 ### Added

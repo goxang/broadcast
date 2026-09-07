@@ -45,6 +45,11 @@ jobs:
       - name: Formatted
         run: make fmt-check
 
+      # The coverage and benchmark gates are shell, so shell gets linted too.
+      # shellcheck ships on the runner image.
+      - name: Shell scripts
+        run: make shellcheck
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -70,8 +75,15 @@ jobs:
 
   coverage-test:
     runs-on: ubuntu-latest
+    # The report is published as a job output rather than an artifact so the
+    # job that writes the pull request comment can read it directly.
+    outputs:
+      report: ${{ steps.compare.outputs.report }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The comparison builds the base branch, so it needs history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
@@ -81,17 +93,49 @@ jobs:
       - name: Coverage
         run: make go.test.coverage
 
+      # continue-on-error, then a separate step that re-reads the outcome:
+      # the report has to survive a failing gate, because a reviewer looking
+      # at a red build is exactly who needs to see which functions lost
+      # coverage.
+      - name: Compare coverage against the base branch
+        id: compare
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          COVERAGE_REPORT: coverage-report.md
+        run: |
+          set +e
+          make go-coverage-compare
+          status=$?
+          set -e
+          delimiter="report-$RANDOM$RANDOM"
+          {
+            echo "report<<$delimiter"
+            cat coverage-report.md 2>/dev/null
+            echo "$delimiter"
+          } >>"$GITHUB_OUTPUT"
+          exit $status
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage
           path: coverage.out
 
+      - name: Coverage did not regress
+        if: steps.compare.outcome == 'failure'
+        run: |
+          echo "coverage fell further than the tolerance; see the step above"
+          exit 1
+
   go-benchmark-test:
     runs-on: ubuntu-latest
+    outputs:
+      report: ${{ steps.compare.outputs.report }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # The comparison checks out the base branch, so it needs history.
+          # The comparison builds the base branch, so it needs history.
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
@@ -99,15 +143,69 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # On main there is nothing to compare against, so this is a smoke run:
+      # it proves the benchmarks still work and leaves indicative numbers in
+      # the log for the commit being released.
       - name: Benchmarks
+        if: github.event_name != 'pull_request'
+        env:
+          BENCH_COUNT: 1
+          BENCH_TIME: 200ms
+        run: make go-benchmark
+
+      - name: Compare benchmarks against the base branch
+        id: compare
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
         env:
           BASE_REF: origin/${{ github.base_ref }}
+          BENCH_REPORT: bench-report.md
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            make go-benchmark-compare
-          else
-            make go-benchmark
-          fi
+          set +e
+          make go-benchmark-compare
+          status=$?
+          set -e
+          delimiter="report-$RANDOM$RANDOM"
+          {
+            echo "report<<$delimiter"
+            cat bench-report.md 2>/dev/null
+            echo "$delimiter"
+          } >>"$GITHUB_OUTPUT"
+          exit $status
+
+      - name: Benchmarks did not regress
+        if: steps.compare.outcome == 'failure'
+        run: |
+          echo "allocations increased or wall time regressed; see the step above"
+          exit 1
+
+  # The two comparisons above run in parallel, so the comment is assembled by
+  # a third job once both have something to say. always() so that a red gate
+  # still gets its table posted — that is the run where the numbers matter
+  # most.
+  pr-report:
+    name: PR report
+    if: always() && github.event_name == 'pull_request'
+    needs: [coverage-test, go-benchmark-test]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # Through the environment, never interpolated into the script: the
+      # reports contain benchmark and function names taken from the branch
+      # under test, which is untrusted input.
+      - name: Assemble and post the comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COVERAGE_BODY: ${{ needs.coverage-test.outputs.report }}
+          BENCH_BODY: ${{ needs.go-benchmark-test.outputs.report }}
+        run: |
+          printf '%s\n' "$COVERAGE_BODY" > coverage-report.md
+          printf '%s\n' "$BENCH_BODY" > bench-report.md
+          tools/hack/pr-comment.sh coverage-report.md bench-report.md
 
   vuln:
     runs-on: ubuntu-latest
