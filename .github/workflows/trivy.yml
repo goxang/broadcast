@@ -1,0 +1,32 @@
+name: Trivy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '55 17 * * 5'
+
+permissions:
+  contents: read
+
+jobs:
+  image-scan:
+    name: Image Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Build the image
+        run: docker build -t goxang/broadcast:${{ github.sha }} -f Dockerfile .
+
+      # The runtime image is FROM scratch with one static binary in it, so
+      # anything found here is in the binary itself, not in a base layer.
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: goxang/broadcast:${{ github.sha }}
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH

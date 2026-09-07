@@ -324,7 +324,7 @@ func (c *Controller) updateStatus(ctx context.Context, bc *v1alpha1.Broadcast, e
 	// Short-circuit when nothing changed to avoid status-update churn.
 	if bc.Status.Endpoints == endpoints &&
 		bc.Status.ObservedGeneration == bc.Generation &&
-		conditionEqual(bc.Status.Conditions, cond) {
+		conditionEqual(bc.Status.Conditions, &cond) {
 		return nil
 	}
 
@@ -339,7 +339,7 @@ func (c *Controller) updateStatus(ctx context.Context, bc *v1alpha1.Broadcast, e
 
 // conditionEqual reports whether conditions already contain an equivalent
 // Ready condition (same status/reason/message and observed generation).
-func conditionEqual(conds []metav1.Condition, want metav1.Condition) bool {
+func conditionEqual(conds []metav1.Condition, want *metav1.Condition) bool {
 	for _, c := range conds {
 		if c.Type != want.Type {
 			continue
