@@ -3,16 +3,31 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Called by the CD stage in ci.yml once a pull request has landed on main
+  # and the tag for the version has been created.
+  workflow_call:
+    inputs:
+      tag:
+        description: The tag to publish.
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # A tag push carries the tag in the ref; a workflow_call runs on main
+      # and has to be told which one it is publishing.
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
@@ -30,7 +45,7 @@ jobs:
 
       - name: Chart version matches the tag
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           chart=$(awk '/^version:/ { print $2 }' charts/broadcast/Chart.yaml)
           if [[ "$chart" != "$version" ]]; then
             echo "charts/broadcast/Chart.yaml says version $chart, tag says $version"
@@ -39,15 +54,15 @@ jobs:
 
       - name: Changelog entry exists
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           if ! grep -q "^## \[$version\]" CHANGELOG.md; then
-            echo "CHANGELOG.md has no '## [$version]' section for tag $GITHUB_REF_NAME"
+            echo "CHANGELOG.md has no '## [$version]' section for tag $RELEASE_TAG"
             exit 1
           fi
 
       - name: Extract release notes
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           awk -v v="$version" '
             $0 ~ "^## \\[" v "\\]" { on = 1; next }
             on && /^## \[/ { exit }
@@ -58,6 +73,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
+          # Named explicitly: on a workflow_call the ref is main, not the tag.
+          tag_name: ${{ env.RELEASE_TAG }}
           body_path: release-notes.md
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}

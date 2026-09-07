@@ -170,3 +170,60 @@ jobs:
 
       - name: e2e
         run: make e2e
+
+  # CD. Runs only after a pull request has landed on main, and only once every
+  # gate above is green. The version comes from the changelog, so cutting a
+  # release is a merge of the commit that writes the section — no separate
+  # tagging step, and no release for a merge that did not bump the version.
+  tag:
+    name: Tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, tidy-check, test, coverage-test, go-benchmark-test, vuln, helm, docker, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # Existing tags decide whether this version was already released.
+          fetch-depth: 0
+
+      - name: Resolve the version to release
+        id: resolve
+        run: |
+          # The first heading with a digit: "Unreleased" is skipped by the
+          # pattern, so the newest released section wins.
+          version=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -1)
+          if [[ -z "$version" ]]; then
+            echo "CHANGELOG.md declares no released version"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already tagged; nothing to release"
+            exit 0
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag
+        if: steps.resolve.outputs.tag != ''
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+  # A tag pushed by GITHUB_TOKEN does not start another workflow, so the
+  # release is called directly rather than left to the tag trigger.
+  release:
+    name: Release
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
