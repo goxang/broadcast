@@ -12,6 +12,7 @@ BIN          := bin/broadcast
 GOLANGCI_LINT_VERSION ?= v2.13.2
 COVERAGE_THRESHOLD ?= 35
 BENCH_COUNT ?= 6
+BENCH_TIME ?= 1s
 
 .DEFAULT_GOAL := help
 
@@ -71,11 +72,22 @@ go.test.coverage: ## Run tests with coverage and enforce the threshold
 
 .PHONY: go-benchmark
 go-benchmark: ## Run the benchmarks
-	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCH_COUNT) ./...
+	$(GO) test -run='^$$' -bench=. -benchmem -count=$(BENCH_COUNT) -benchtime=$(BENCH_TIME) ./...
 
 .PHONY: go-benchmark-compare
 go-benchmark-compare: ## Compare benchmarks against BASE_REF (default origin/main)
 	./tools/hack/go-benchmark-compare.sh
+
+.PHONY: go-coverage-compare
+go-coverage-compare: ## Compare coverage against BASE_REF (default origin/main)
+	./tools/hack/go-coverage-compare.sh
+
+.PHONY: shellcheck
+shellcheck: ## Lint the scripts under tools/hack (needs shellcheck on PATH)
+	@command -v shellcheck >/dev/null || { \
+		echo "shellcheck not found: https://github.com/koalaman/shellcheck#installing"; \
+		exit 1; }
+	shellcheck tools/hack/*.sh
 
 .PHONY: verify
 verify: tidy-check fmt-check vet test-race lint ## Run every static check CI runs
