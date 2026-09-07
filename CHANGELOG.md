@@ -7,7 +7,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The release workflow refuses to publish a tag that has no section here, so a
 release starts by writing one.
 
-## [Unreleased]
+## [0.1.0] - 2026-09-07
+
+### Added
+
+- Initial release: a Kubernetes `Broadcast` custom resource and a controller
+  that fans one HTTP request out to every ready endpoint of a target Service,
+  best-effort, with Prometheus metrics and a Helm chart.
 
 ### Changed
 
@@ -34,17 +40,13 @@ release starts by writing one.
   ratchet, not a target: raise it as tests land.
 - New workflows: CodeQL, OSV-Scanner, license scan against a permissive
   allowlist, Trivy image scan, OpenSSF Scorecard, and a stale-issue sweep.
-- Release workflow on `v*` tags: runs the suite, refuses a tag whose version
-  does not match `charts/broadcast/Chart.yaml` or has no section in this file,
-  and publishes that section as the release notes.
+- Release workflow: runs the suite, refuses a version that does not match
+  `charts/broadcast/Chart.yaml` or has no section in this file, and publishes
+  that section as the release notes. It is called by the CD stage and also
+  runs on a hand-pushed `v*` tag.
 - `golangci-lint` configuration pinned in `.golangci.yml`.
 - Every GitHub Action is pinned to a commit SHA; dependabot proposes the
   bumps for actions, Go modules, and the Dockerfile base image.
-
-## [0.1.0]
-
-### Added
-
-- Initial release: a Kubernetes `Broadcast` custom resource and a controller
-  that fans one HTTP request out to every ready endpoint of a target Service,
-  best-effort, with Prometheus metrics and a Helm chart.
+- Releases are cut by merging to `main`: once every CI job passes there, the
+  `tag` job tags the newest version in this file, if it is not tagged already,
+  and the release job publishes it from that section.

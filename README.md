@@ -185,6 +185,13 @@ timeout/concurrency bounds. `test/e2e/run.sh` builds the images, installs the
 chart into a `kind` cluster, and exercises basic fan-out, scaling, pod removal,
 slow and failing targets, endpoint churn, and Service independence.
 
+Releasing is a merge. When a pull request lands on `main` and every CI job
+passes, the `tag` job reads the newest version in `CHANGELOG.md`, and if no tag
+exists for it, creates one and publishes the release from that section. The
+release job re-runs the suite and refuses a version that disagrees with
+`charts/broadcast/Chart.yaml`. A merge that does not add a version section
+releases nothing.
+
 ## License
 
 [Apache-2.0](LICENSE)
