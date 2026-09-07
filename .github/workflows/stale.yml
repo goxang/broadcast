@@ -1,0 +1,44 @@
+name: Stale
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  prune_stale:
+    name: Prune Stale
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    # Forks inherit the workflow but not the intent to run it.
+    if: github.repository == 'goxang/broadcast'
+
+    steps:
+      - name: Prune Stale
+        uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93  # v11.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          days-before-pr-stale: 30
+          days-before-pr-close: 7
+          days-before-issue-stale: 60
+          # Issues go stale but are never closed automatically: an unanswered
+          # bug report is still a bug.
+          days-before-issue-close: -1
+          stale-issue-message: >
+            This issue has had no activity for 60 days. It is still open;
+            the label is only a marker that it needs a look.
+          stale-pr-message: >
+            This pull request has had no activity for 30 days and will be
+            closed in 7 days. A status update or a ping for review keeps it
+            open.
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: 'pinned,help wanted'
+          exempt-pr-labels: pinned
+          operations-per-run: 100
+          ascending: true

@@ -4,58 +4,169 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: Build and test
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.26.x"
+          go-version-file: go.mod
           cache: true
 
-      - name: gofmt check
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.13.2
 
-      - name: go vet
+  tidy-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go mod tidy is a no-op
+        run: make tidy-check
+
+      - name: Formatted
+        run: make fmt-check
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test -race -shuffle=on -count=1 ./...
+
+      - name: Vet
         run: go vet ./...
 
-      - name: go test
-        run: go test ./...
+      - name: Build
+        run: go build ./...
 
-      - name: go test -race
-        run: go test -race ./...
+  coverage-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Coverage
+        run: make go.test.coverage
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: coverage
+          path: coverage.out
+
+  go-benchmark-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The comparison checks out the base branch, so it needs history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Benchmarks
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            make go-benchmark-compare
+          else
+            make go-benchmark
+          fi
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f  # v1.1.0
 
   helm:
     name: Helm chart
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: v3.14.4
 
-      - name: helm lint
-        run: helm lint charts/broadcast
-
-      - name: helm template
-        run: helm template test charts/broadcast --namespace goxang-broadcast-system
+      - name: helm lint and template
+        run: make helm-lint
 
   docker:
     name: Container build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: build broadcast image
-        run: docker build -t goxang/broadcast:ci -f Dockerfile .
+      - name: Build images
+        run: make docker-build
 
-      - name: build target image
-        run: docker build -t goxang/broadcast-target:ci -f test/targets/Dockerfile .
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    # The e2e suite builds images and stands up a cluster, so it waits for the
+    # cheap signals rather than burning ten minutes on a typo.
+    needs: [lint, test, helm, docker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
+        with:
+          version: v3.14.4
+
+      # The suite creates and deletes its own cluster, so only the binary is
+      # wanted here.
+      - uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2  # v1.15.0
+        with:
+          install_only: true
+
+      - name: e2e
+        run: make e2e

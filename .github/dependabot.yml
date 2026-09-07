@@ -1,0 +1,32 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore"
+    labels: [dependencies]
+
+  # Kubernetes client libraries move together; a single grouped pull request
+  # is reviewable, forty separate ones are not.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore"
+    labels: [dependencies]
+    groups:
+      kubernetes:
+        patterns: ["k8s.io/*", "sigs.k8s.io/*"]
+      golang-x:
+        patterns: ["golang.org/x/*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore"
+    labels: [dependencies]

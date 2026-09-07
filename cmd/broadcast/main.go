@@ -87,10 +87,10 @@ func run() error {
 	// Broadcast informer (namespace-scoped when --namespace is set).
 	bc := broadcastClient.Broadcasts(namespace)
 	listWatch := &cache.ListWatch{
-		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 			return bc.List(ctx, opts)
 		},
-		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
 			return bc.Watch(ctx, opts)
 		},
 	}

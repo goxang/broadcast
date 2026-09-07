@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag is permanent once the module proxy has seen it, so the gates
+      # that matter run before the release is published, not after.
+      - name: Test
+        run: make test-race
+
+      - name: Vet
+        run: make vet
+
+      - name: Chart version matches the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          chart=$(awk '/^version:/ { print $2 }' charts/broadcast/Chart.yaml)
+          if [[ "$chart" != "$version" ]]; then
+            echo "charts/broadcast/Chart.yaml says version $chart, tag says $version"
+            exit 1
+          fi
+
+      - name: Changelog entry exists
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^## \[$version\]" CHANGELOG.md; then
+            echo "CHANGELOG.md has no '## [$version]' section for tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          cat release-notes.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

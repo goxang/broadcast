@@ -286,7 +286,9 @@ func (p *Proxy) sendOne(
 	}
 	defer resp.Body.Close()
 	// Drain and discard the response body so the connection can be reused.
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	// A failure here only costs the connection, which is not worth reporting:
+	// the target already answered and its status is what the caller wants.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 
 	p.observeTarget(name, strconv.Itoa(resp.StatusCode))
 	return targetResult{status: resp.StatusCode}
