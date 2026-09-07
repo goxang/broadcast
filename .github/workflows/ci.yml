@@ -65,10 +65,6 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Format check
-        shell: bash
-        run: test -z "$(gofmt -l .)"
-
       - name: Build
         run: go build ./...
 

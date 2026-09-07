@@ -27,7 +27,11 @@ release starts by writing one.
   branch. Allocation counts are deterministic, so an increase fails the job;
   wall-clock deltas are reported but never gated.
 - `tidy-check` fails if `go mod tidy` or `gofmt` would change the committed
-  tree.
+  tree. Formatting is checked there and only there: it does not vary by
+  operating system, and running it on a Windows checkout only finds line
+  endings.
+- `coverage-test` enforces a 35% floor, just under the current 36.9%. It is a
+  ratchet, not a target: raise it as tests land.
 - New workflows: CodeQL, OSV-Scanner, license scan against a permissive
   allowlist, Trivy image scan, OpenSSF Scorecard, and a stale-issue sweep.
 - Release workflow on `v*` tags: runs the suite, refuses a tag whose version

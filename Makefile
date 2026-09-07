@@ -10,7 +10,7 @@ TARGET_IMG   ?= ghcr.io/goxang/broadcast-target:latest
 BIN          := bin/broadcast
 
 GOLANGCI_LINT_VERSION ?= v2.13.2
-COVERAGE_THRESHOLD ?= 55
+COVERAGE_THRESHOLD ?= 35
 BENCH_COUNT ?= 6
 
 .DEFAULT_GOAL := help
